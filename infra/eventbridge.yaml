@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Event-driven glue for pv-yolov8: monthly retraining via EventBridge Scheduler,
+  a model-approval rule that runs the CodePipeline deploy stage, a drift alarm
+  rule that starts retraining off-schedule, and a pipeline-failure SNS notice.
+
+Parameters:
+  Project:
+    Type: String
+    Default: pv-yolov8
+  PipelineName:
+    Type: String
+    Description: SageMaker training pipeline name (pv-yolov8-training).
+  CodePipelineName:
+    Type: String
+    Description: CodePipeline name to (re)run for deploys.
+  ModelPackageGroup:
+    Type: String
+    Default: pv-yolov8-models
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 3 1 * ? *)   # 03:00 UTC on the 1st of each month
+  AlarmTopicArn:
+    Type: String
+  DriftAlarmName:
+    Type: String
+    Default: pv-yolov8-detection-drift
+
+Resources:
+  # ------------------------------------------------ monthly retraining
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-scheduler"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sagemaker:StartPipelineExecution
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${PipelineName}"
+
+  MonthlyRetrainSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "${Project}-monthly-retrain"
+      FlexibleTimeWindow: { Mode: "OFF" }
+      ScheduleExpression: !Ref ScheduleExpression
+      Target:
+        Arn: "arn:aws:scheduler:::aws-sdk:sagemaker:startPipelineExecution"
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: !Sub |
+          {
+            "PipelineName": "${PipelineName}",
+            "PipelineExecutionDescription": "monthly scheduled retrain",
+            "PipelineParameters": [
+              {"Name": "ModelApprovalStatus", "Value": "PendingManualApproval"}
+            ]
+          }
+
+  # ------------------------------------------------ deploy on model approval
+  EventBridgeInvokePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-eb-invoke"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-codepipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineName}"
+
+  ModelApprovalRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Project}-model-approved"
+      Description: Redeploy when a model package is approved.
+      EventPattern:
+        source: [aws.sagemaker]
+        detail-type: ["SageMaker Model Package State Change"]
+        detail:
+          ModelPackageGroupName: [!Ref ModelPackageGroup]
+          ModelApprovalStatus: [Approved]
+      Targets:
+        - Id: run-deploy
+          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineName}"
+          RoleArn: !GetAtt EventBridgeInvokePipelineRole.Arn
+
+  # ------------------------------------------------ drift-triggered retrain
+  RetrainLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-retrain-lambda"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: start-pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sagemaker:StartPipelineExecution
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${PipelineName}"
+
+  RetrainLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Project}-drift-retrain"
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      Role: !GetAtt RetrainLambdaRole.Arn
+      Environment:
+        Variables:
+          PIPELINE_NAME: !Ref PipelineName
+      Code:
+        ZipFile: |
+          import os, boto3
+          sm = boto3.client("sagemaker")
+          def handler(event, _ctx):
+              # Only react to the alarm entering ALARM state.
+              if event.get("detail", {}).get("state", {}).get("value") != "ALARM":
+                  return {"skipped": True}
+              resp = sm.start_pipeline_execution(
+                  PipelineName=os.environ["PIPELINE_NAME"],
+                  PipelineExecutionDescription="drift-triggered retrain",
+                  PipelineParameters=[
+                      {"Name": "ModelApprovalStatus", "Value": "PendingManualApproval"}
+                  ],
+              )
+              return {"started": resp["PipelineExecutionArn"]}
+
+  DriftAlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Project}-drift-retrain"
+      Description: Start retraining when the detection-drift alarm fires.
+      EventPattern:
+        source: [aws.cloudwatch]
+        detail-type: ["CloudWatch Alarm State Change"]
+        resources:
+          - !Sub "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DriftAlarmName}"
+        detail:
+          state:
+            value: [ALARM]
+      Targets:
+        - Id: retrain-lambda
+          Arn: !GetAtt RetrainLambda.Arn
+
+  DriftRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RetrainLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DriftAlarmRule.Arn
+
+  # ------------------------------------------------ pipeline-failure notice
+  PipelineFailureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Project}-pipeline-failed"
+      Description: Notify on SageMaker pipeline execution failure.
+      EventPattern:
+        source: [aws.sagemaker]
+        detail-type: ["SageMaker Model Building Pipeline Execution Status Change"]
+        detail:
+          pipelineName: [!Ref PipelineName]
+          currentPipelineExecutionStatus: [Failed]
+      Targets:
+        - Id: notify
+          Arn: !Ref AlarmTopicArn
+
+Outputs:
+  MonthlyScheduleName:
+    Value: !Ref MonthlyRetrainSchedule
+  RetrainLambdaArn:
+    Value: !GetAtt RetrainLambda.Arn

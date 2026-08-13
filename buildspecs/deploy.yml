@@ -1,0 +1,35 @@
+version: 0.2
+# Stage 4: deploy the latest *Approved* model package to the endpoint.
+# Re-resolves the registry rather than trusting the upstream artifact, so this
+# stage is safe to trigger from the model-approval EventBridge rule too.
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+  build:
+    commands:
+      - export AWS_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+      - |
+        MPA=$(aws sagemaker list-model-packages \
+          --model-package-group-name "$MODEL_PACKAGE_GROUP" \
+          --model-approval-status Approved \
+          --sort-by CreationTime --sort-order Descending --max-results 1 \
+          --query 'ModelPackageSummaryList[0].ModelPackageArn' --output text)
+      - test "$MPA" != "None" || { echo "no approved model package"; exit 1; }
+      - echo "deploying $MPA"
+      - |
+        aws cloudformation deploy \
+          --template-file infra/endpoint.yaml \
+          --stack-name "${PROJECT}-endpoint" \
+          --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+          --no-fail-on-empty-changeset \
+          --parameter-overrides \
+            Project="$PROJECT" \
+            ModelPackageArn="$MPA" \
+            ModelVersion="${MPA##*/}" \
+            SageMakerExecutionRoleArn="$SAGEMAKER_ROLE_ARN" \
+            DataCaptureS3Uri="s3://${ARTIFACT_BUCKET}/${PROJECT}/datacapture" \
+            AlarmTopicArn="${ALARM_TOPIC_ARN:-}"
+  post_build:
+    commands:
+      - python pipelines/monitoring.py --endpoint-name "${PROJECT}-endpoint" --topic-arn "${ALARM_TOPIC_ARN:-}" || true

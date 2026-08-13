@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Real-time GPU endpoint for the pv-yolov8 detector. Model is built from the
+  approved Model Package ARN alone (it already carries the inference image
+  digest and model artifact). Adds data capture, blue/green rollout with auto
+  rollback, invocation-based autoscaling, and CloudWatch alarms.
+
+Parameters:
+  Project:
+    Type: String
+    Default: pv-yolov8
+  ModelPackageArn:
+    Type: String
+    Description: Approved SageMaker Model Package ARN to deploy.
+  ModelVersion:
+    Type: String
+    Description: Version suffix (e.g. the package version) to make config names unique.
+  SageMakerExecutionRoleArn:
+    Type: String
+  InstanceType:
+    Type: String
+    Default: ml.g4dn.xlarge
+  InitialInstanceCount:
+    Type: Number
+    Default: 1
+  MinCapacity:
+    Type: Number
+    Default: 1
+  MaxCapacity:
+    Type: Number
+    Default: 4
+  InvocationsPerInstanceTarget:
+    Type: Number
+    Default: 50
+  DataCaptureS3Uri:
+    Type: String
+    Description: s3://.../datacapture prefix for request/response capture.
+  DataCaptureSamplingPercent:
+    Type: Number
+    Default: 100
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+    Description: Optional SNS topic for endpoint alarms.
+
+Conditions:
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+
+Resources:
+  Model:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ModelName: !Sub "${Project}-${ModelVersion}"
+      ExecutionRoleArn: !Ref SageMakerExecutionRoleArn
+      PrimaryContainer:
+        ModelPackageName: !Ref ModelPackageArn
+
+  # EndpointConfig is immutable, so the name must carry the version. Without it
+  # CloudFormation reports "no changes" and keeps serving the previous model.
+  EndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: !Sub "${Project}-${ModelVersion}"
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !GetAtt Model.ModelName
+          InitialInstanceCount: !Ref InitialInstanceCount
+          InstanceType: !Ref InstanceType
+          InitialVariantWeight: 1.0
+      DataCaptureConfig:
+        EnableCapture: true
+        InitialSamplingPercentage: !Ref DataCaptureSamplingPercent
+        DestinationS3Uri: !Ref DataCaptureS3Uri
+        CaptureOptions:
+          - CaptureMode: Input
+          - CaptureMode: Output
+        CaptureContentTypeHeader:
+          CsvContentTypes:
+            - text/csv
+          JsonContentTypes:
+            - application/json
+
+  Endpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointName: !Sub "${Project}-endpoint"
+      EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
+      DeploymentConfig:
+        BlueGreenUpdatePolicy:
+          TrafficRoutingConfiguration:
+            Type: CANARY
+            CanarySize:
+              Type: CAPACITY_PERCENT
+              Value: 20
+            WaitIntervalInSeconds: 300
+          TerminationWaitInSeconds: 300
+          MaximumExecutionTimeoutInSeconds: 1800
+        AutoRollbackConfiguration:
+          Alarms:
+            - AlarmName: !Sub "${Project}-endpoint-5xx"
+            - AlarmName: !Sub "${Project}-endpoint-latency"
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub "endpoint/${Project}-endpoint/variant/AllTraffic"
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/sagemaker.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint"
+      ScalableDimension: sagemaker:variant:DesiredInstanceCount
+      ServiceNamespace: sagemaker
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${Project}-invocations-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref InvocationsPerInstanceTarget
+        PredefinedMetricSpecification:
+          PredefinedMetricType: SageMakerVariantInvocationsPerInstance
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # Named to match the AutoRollbackConfiguration above.
+  Endpoint5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-endpoint-5xx"
+      AlarmDescription: 5xx errors from the endpoint
+      Namespace: AWS/SageMaker
+      MetricName: Invocation5XXErrors
+      Dimensions:
+        - Name: EndpointName
+          Value: !Sub "${Project}-endpoint"
+        - Name: VariantName
+          Value: AllTraffic
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref "AWS::NoValue"]
+
+  EndpointLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Project}-endpoint-latency"
+      AlarmDescription: p99 model latency too high
+      Namespace: AWS/SageMaker
+      MetricName: ModelLatency
+      Dimensions:
+        - Name: EndpointName
+          Value: !Sub "${Project}-endpoint"
+        - Name: VariantName
+          Value: AllTraffic
+      ExtendedStatistic: p99
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 2000000  # microseconds = 2s
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref "AWS::NoValue"]
+
+Outputs:
+  EndpointName:
+    Value: !Sub "${Project}-endpoint"
+  ModelName:
+    Value: !GetAtt Model.ModelName
+  EndpointConfigName:
+    Value: !GetAtt EndpointConfig.EndpointConfigName

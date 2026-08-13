@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CI/CD for pv-yolov8: Source -> Test -> Images -> Train (SageMaker Pipeline) ->
+  Deploy (endpoint). Four CodeBuild projects, least-privilege roles, and an
+  artifact bucket. Deployment also hangs off model approval (see eventbridge.yaml).
+
+Parameters:
+  Project:
+    Type: String
+    Default: pv-yolov8
+  GitHubConnectionArn:
+    Type: String
+    Description: CodeConnections (CodeStar) connection ARN to GitHub.
+  RepositoryId:
+    Type: String
+    Description: "owner/repo"
+  BranchName:
+    Type: String
+    Default: main
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket for CodePipeline artifacts and SageMaker data.
+  ModelPackageGroup:
+    Type: String
+    Default: pv-yolov8-models
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+
+Resources:
+  # ------------------------------------------------------------------ roles
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-codebuild"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}"
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}/*"
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Project}/*"
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreatePipeline
+                  - sagemaker:UpdatePipeline
+                  - sagemaker:DescribePipeline
+                  - sagemaker:StartPipelineExecution
+                  - sagemaker:DescribePipelineExecution
+                  - sagemaker:ListPipelineExecutionSteps
+                  - sagemaker:ListModelPackages
+                  - sagemaker:DescribeModelPackage
+                  - sagemaker:CreateModelPackage
+                  - sagemaker:AddTags
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateModel
+                  - sagemaker:CreateEndpointConfig
+                  - sagemaker:CreateEndpoint
+                  - sagemaker:UpdateEndpoint
+                  - sagemaker:DescribeEndpoint
+                  - sagemaker:DescribeEndpointConfig
+                  - sagemaker:DescribeModel
+                  - application-autoscaling:*
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:DescribeAlarms
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt SageMakerExecutionRole.Arn
+
+  # Role SageMaker jobs and the endpoint assume.
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-sagemaker"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sagemaker.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: data-and-images
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket, s3:DeleteObject]
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}"
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}/*"
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: "*"
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-codepipeline"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codepipeline.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:GetBucketLocation, s3:ListBucket]
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}"
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}/*"
+              - Effect: Allow
+                Action: [codebuild:BatchGetBuilds, codebuild:StartBuild]
+                Resource: "*"
+              - Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+  # --------------------------------------------------------------- projects
+  TestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${Project}-test"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/test.yml
+
+  ImagesProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${Project}-images"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true  # docker-in-docker for image builds
+        EnvironmentVariables:
+          - { Name: PROJECT, Value: !Ref Project }
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/images.yml
+
+  PipelineProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${Project}-pipeline"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - { Name: PROJECT, Value: !Ref Project }
+          - { Name: SAGEMAKER_ROLE_ARN, Value: !GetAtt SageMakerExecutionRole.Arn }
+          - { Name: MODEL_PACKAGE_GROUP, Value: !Ref ModelPackageGroup }
+          - { Name: ARTIFACT_BUCKET, Value: !Ref ArtifactBucket }
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/pipeline.yml
+
+  DeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${Project}-deploy"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - { Name: PROJECT, Value: !Ref Project }
+          - { Name: SAGEMAKER_ROLE_ARN, Value: !GetAtt SageMakerExecutionRole.Arn }
+          - { Name: MODEL_PACKAGE_GROUP, Value: !Ref ModelPackageGroup }
+          - { Name: ARTIFACT_BUCKET, Value: !Ref ArtifactBucket }
+          - { Name: ALARM_TOPIC_ARN, Value: !Ref AlarmTopicArn }
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/deploy.yml
+
+  # --------------------------------------------------------------- pipeline
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref Project
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Ref RepositoryId
+                BranchName: !Ref BranchName
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts: [{ Name: Source }]
+        - Name: Test
+          Actions:
+            - Name: Test
+              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: "1" }
+              Configuration: { ProjectName: !Ref TestProject }
+              InputArtifacts: [{ Name: Source }]
+        - Name: Images
+          Actions:
+            - Name: Images
+              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: "1" }
+              Configuration: { ProjectName: !Ref ImagesProject }
+              InputArtifacts: [{ Name: Source }]
+              OutputArtifacts: [{ Name: Images }]
+        - Name: Train
+          Actions:
+            - Name: Train
+              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: "1" }
+              Configuration: { ProjectName: !Ref PipelineProject }
+              InputArtifacts: [{ Name: Images }]
+              OutputArtifacts: [{ Name: Trained }]
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: "1" }
+              Configuration: { ProjectName: !Ref DeployProject }
+              InputArtifacts: [{ Name: Trained }]
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+  SageMakerExecutionRoleArn:
+    Value: !GetAtt SageMakerExecutionRole.Arn

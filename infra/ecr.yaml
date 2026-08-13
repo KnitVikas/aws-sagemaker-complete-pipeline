@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ECR repositories for the pv-yolov8 pipeline images (preprocess, train,
+  evaluate, inference). Scan on push, untagged images expire, tags stay mutable
+  (immutability is enforced downstream by deploying digests, not tags).
+
+Parameters:
+  Project:
+    Type: String
+    Default: pv-yolov8
+  UntaggedExpireDays:
+    Type: Number
+    Default: 14
+
+Resources:
+  PreprocessRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Project}/preprocess"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "expire untagged",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedExpireDays}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  TrainRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Project}/train"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "expire untagged",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedExpireDays}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  EvaluateRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Project}/evaluate"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "expire untagged",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedExpireDays}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # No untagged-expiry on inference: a model package references its image by
+  # digest and that image must outlive every endpoint built from the package.
+  InferenceRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Project}/inference"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+
+Outputs:
+  PreprocessRepoUri:
+    Value: !GetAtt PreprocessRepo.RepositoryUri
+  TrainRepoUri:
+    Value: !GetAtt TrainRepo.RepositoryUri
+  EvaluateRepoUri:
+    Value: !GetAtt EvaluateRepo.RepositoryUri
+  InferenceRepoUri:
+    Value: !GetAtt InferenceRepo.RepositoryUri

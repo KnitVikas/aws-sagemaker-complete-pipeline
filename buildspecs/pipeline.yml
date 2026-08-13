@@ -1,0 +1,31 @@
+version: 0.2
+# Stage 3: upsert + run the SageMaker Pipeline, wait, capture the model package.
+env:
+  exported-variables:
+    - MODEL_PACKAGE_ARN
+    - PIPELINE_EXECUTION_ARN
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --no-cache-dir -r requirements.txt
+  build:
+    commands:
+      - |
+        python pipelines/training_pipeline.py \
+          --upsert --start --wait \
+          --images build/images.json \
+          --role-arn "$SAGEMAKER_ROLE_ARN" \
+          --model-package-group "$MODEL_PACKAGE_GROUP" \
+          --git-sha "$CODEBUILD_RESOLVED_SOURCE_VERSION" \
+          --output build/model_package.json
+      - export MODEL_PACKAGE_ARN="$(python -c 'import json;print(json.load(open("build/model_package.json")).get("model_package_arn",""))')"
+      - export PIPELINE_EXECUTION_ARN="$(python -c 'import json;print(json.load(open("build/model_package.json")).get("pipeline_execution_arn",""))')"
+      - cat build/model_package.json
+artifacts:
+  files:
+    - build/model_package.json
+    - build/images.json
+    - infra/*.yaml
+  name: pipeline

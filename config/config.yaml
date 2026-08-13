@@ -1,0 +1,75 @@
+project: pv-yolov8
+region: us-east-1
+
+bucket: ""
+prefix: pv-yolov8
+
+data:
+  # Local zip sources (symlinked from /data-mount/ops/tp_ops by default).
+  person_zip: data/zips/person.zip
+  vehicle_zip: data/zips/vehicle.zip
+  raw_dir: data/raw
+  # Unified class map used everywhere after preprocess.
+  classes:
+    person: 0
+    vehicle: 1
+
+split:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+  seed: 42
+
+train:
+  # YOLOv8 nano keeps local + ml.g4dn.xlarge runs cheap on ~500 images.
+  model: yolov8n.pt
+  imgsz: 640
+  epochs: 50
+  batch: 8
+  workers: 2
+  patience: 15
+  instance_type: ml.g4dn.xlarge
+  instance_count: 1
+  volume_size_gb: 50
+  max_runtime_seconds: 7200
+
+processing:
+  instance_type: ml.m5.xlarge
+  instance_count: 1
+  volume_size_gb: 30
+
+evaluation:
+  # Quality gate: register only when mAP50 is at or above this.
+  map50_threshold: 0.40
+  conf: 0.25
+  iou: 0.50
+
+registry:
+  model_package_group: pv-yolov8-models
+  approval_status: PendingManualApproval
+
+endpoint:
+  name: pv-yolov8-endpoint
+  instance_type: ml.g4dn.xlarge
+  initial_instance_count: 1
+  min_capacity: 1
+  max_capacity: 4
+  invocations_per_instance_target: 50
+  data_capture_sampling_percent: 100
+
+monitoring:
+  schedule_expression: cron(0 * ? * * *)
+  max_runtime_seconds: 1800
+
+pipeline:
+  name: pv-yolov8-training
+  schedule_expression: cron(0 3 1 * ? *)
+  cache_expire_after: 30d
+
+ecr:
+  images:
+    - preprocess
+    - train
+    - evaluate
+    - inference
+  untagged_expiry_days: 14

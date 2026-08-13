@@ -1,0 +1,15 @@
+# Runtime dependencies for local driver + containers.
+# Ultralytics pins its own torch; keep versions aligned across train/eval/infer.
+ultralytics>=8.3.0,<9
+torch>=2.1,<3
+torchvision>=0.16,<1
+opencv-python-headless>=4.8,<5
+Pillow>=10.0,<12
+numpy>=1.26,<3
+PyYAML>=6.0,<7
+matplotlib>=3.8,<4
+
+# Driver-side (pipeline definition, deploy, monitoring). Not required inside
+# the training container, but listed here so `make setup` covers everything.
+sagemaker==2.257.6
+boto3>=1.34,<2

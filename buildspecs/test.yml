@@ -1,0 +1,12 @@
+version: 0.2
+# Stage 1: unit tests. No AWS resources touched; fails fast before any build.
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
+  build:
+    commands:
+      - ruff check .
+      - pytest -q -m "not slow and not docker"

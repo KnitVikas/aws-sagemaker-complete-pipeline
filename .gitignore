@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Datasets and model artifacts are reproduced by `make data` / `make train-local`.
+data/raw/
+data/processed/
+artifacts/
+build/
+*.tar.gz
+
+# Ultralytics: pretrained weights auto-downloaded to CWD + run outputs.
+runs/
+*.pt
+
+# Local zip symlinks point at the machine-local source data.
+data/zips/
