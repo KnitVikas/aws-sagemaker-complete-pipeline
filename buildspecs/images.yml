@@ -27,10 +27,14 @@ phases:
       - python scripts/resolve_digests.py --tag "$IMAGE_TAG" --account-id "$ACCOUNT_ID" --output build/images.json
       - cat build/images.json
 artifacts:
+  # Train/Deploy CodeBuild projects read buildspecs/*.yml from THIS artifact
+  # (InputArtifacts: Images → Trained), so buildspecs must be packaged here.
   files:
     - build/images.json
+    - buildspecs/**/*
     - infra/*.yaml
     - pipelines/**/*
+    - scripts/**/*
     - src/**/*
     - config/**/*
     - requirements.txt

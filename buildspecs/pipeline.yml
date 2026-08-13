@@ -24,8 +24,11 @@ phases:
       - export PIPELINE_EXECUTION_ARN="$(python -c 'import json;print(json.load(open("build/model_package.json")).get("pipeline_execution_arn",""))')"
       - cat build/model_package.json
 artifacts:
+  # Deploy reads buildspecs/deploy.yml + pipelines/monitoring.py from this artifact.
   files:
     - build/model_package.json
     - build/images.json
+    - buildspecs/**/*
     - infra/*.yaml
+    - pipelines/**/*
   name: pipeline

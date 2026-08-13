@@ -24,7 +24,7 @@ train:
   # YOLOv8 nano keeps local + ml.g4dn.xlarge runs cheap on ~500 images.
   model: yolov8n.pt
   imgsz: 640
-  epochs: 50
+  epochs: 10
   batch: 8
   workers: 2
   patience: 15
