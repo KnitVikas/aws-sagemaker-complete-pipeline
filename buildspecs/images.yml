@@ -15,7 +15,8 @@ phases:
     commands:
       - export ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
       - export AWS_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-      - export IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:0:8}"
+      # CodeBuild runs each command under /bin/sh, which lacks ${var:0:8}.
+      - export IMAGE_TAG="$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-8)"
       - echo "building tag ${IMAGE_TAG} into ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
   build:
     commands:
