@@ -56,9 +56,12 @@ Resources:
       Target:
         Arn: "arn:aws:scheduler:::aws-sdk:sagemaker:startPipelineExecution"
         RoleArn: !GetAtt SchedulerRole.Arn
+        # ClientRequestToken is required; use the Scheduler execution id so each
+        # monthly run is unique (a fixed token would make later runs no-ops).
         Input: !Sub |
           {
             "PipelineName": "${PipelineName}",
+            "ClientRequestToken": "<aws.scheduler.execution-id>",
             "PipelineExecutionDescription": "monthly scheduled retrain",
             "PipelineParameters": [
               {"Name": "ModelApprovalStatus", "Value": "PendingManualApproval"}

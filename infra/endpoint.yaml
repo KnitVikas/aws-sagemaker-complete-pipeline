@@ -80,20 +80,20 @@ Resources:
           JsonContentTypes:
             - application/json
 
+  # ALL_AT_ONCE works with InitialInstanceCount=1. CANARY requires >=2 instances.
   Endpoint:
     Type: AWS::SageMaker::Endpoint
+    DependsOn:
+      - Endpoint5xxAlarm
+      - EndpointLatencyAlarm
     Properties:
       EndpointName: !Sub "${Project}-endpoint"
       EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
       DeploymentConfig:
         BlueGreenUpdatePolicy:
           TrafficRoutingConfiguration:
-            Type: CANARY
-            CanarySize:
-              Type: CAPACITY_PERCENT
-              Value: 20
-            WaitIntervalInSeconds: 300
-          TerminationWaitInSeconds: 300
+            Type: ALL_AT_ONCE
+          TerminationWaitInSeconds: 60
           MaximumExecutionTimeoutInSeconds: 1800
         AutoRollbackConfiguration:
           Alarms:
@@ -102,6 +102,8 @@ Resources:
 
   ScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - Endpoint
     Properties:
       MaxCapacity: !Ref MaxCapacity
       MinCapacity: !Ref MinCapacity

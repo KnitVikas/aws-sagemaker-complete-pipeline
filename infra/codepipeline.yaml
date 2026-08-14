@@ -86,6 +86,7 @@ Resources:
                   - sagemaker:DescribeModelPackage
                   - sagemaker:CreateModelPackage
                   - sagemaker:AddTags
+                  - sagemaker:ListTags
                 Resource: "*"
               - Effect: Allow
                 Action:
