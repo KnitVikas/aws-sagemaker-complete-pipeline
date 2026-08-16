@@ -108,11 +108,26 @@ Resources:
                   - sagemaker:DescribeEndpoint
                   - sagemaker:DescribeEndpointConfig
                   - sagemaker:DescribeModel
+                  # Endpoint replacement and CloudFormation rollback delete the
+                  # previous model/config/endpoint.
+                  - sagemaker:DeleteModel
+                  - sagemaker:DeleteEndpointConfig
+                  - sagemaker:DeleteEndpoint
+                  # Application Auto Scaling verifies the caller can perform the
+                  # scaling actions before it registers a scalable target.
+                  - sagemaker:UpdateEndpointWeightsAndCapacities
                   - application-autoscaling:*
                   - cloudwatch:PutMetricAlarm
                   - cloudwatch:PutDashboard
                   - cloudwatch:DescribeAlarms
+                  - cloudwatch:DeleteAlarms
                 Resource: "*"
+              - Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: sagemaker.application-autoscaling.amazonaws.com
               - Effect: Allow
                 Action: iam:PassRole
                 Resource: !GetAtt SageMakerExecutionRole.Arn
