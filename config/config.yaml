@@ -24,7 +24,7 @@ train:
   # CPU instance — account training GPU (ml.g4dn.xlarge) quota is 0.
   model: yolov8n.pt
   imgsz: 640
-  epochs: 10
+  epochs: 5
   batch: 8
   workers: 2
   patience: 15
