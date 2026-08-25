@@ -31,6 +31,36 @@ DEFAULT_CONF = float(os.environ.get("YOLO_CONF", "0.25"))
 DEFAULT_IOU = float(os.environ.get("YOLO_IOU", "0.50"))
 
 
+def resolve_device() -> int | str:
+    """Pick CUDA when present; fail on a GPU host whose image cannot see CUDA.
+
+    YOLO_DEVICE=cpu forces CPU (local docker-verify). YOLO_DEVICE=0 forces GPU.
+    SageMaker GPU instances set NVIDIA_VISIBLE_DEVICES; if that is set but
+    torch cannot see CUDA, serving must not silently fall back to CPU.
+    """
+    explicit = os.environ.get("YOLO_DEVICE")
+    if explicit:
+        if explicit.lower() == "cpu":
+            return "cpu"
+        return int(explicit) if explicit.isdigit() else explicit
+
+    nvidia = os.environ.get("NVIDIA_VISIBLE_DEVICES", "")
+    gpu_host = nvidia not in ("", "void", "none", "-1")
+    try:
+        import torch
+
+        cuda = torch.cuda.is_available()
+    except Exception:
+        cuda = False
+
+    if gpu_host and not cuda:
+        raise RuntimeError(
+            "GPU instance is visible (NVIDIA_VISIBLE_DEVICES) but "
+            "torch.cuda.is_available() is False; the inference image is CPU-bound"
+        )
+    return 0 if cuda else "cpu"
+
+
 def model_fn(model_dir: str):
     from ultralytics import YOLO
 
@@ -40,7 +70,9 @@ def model_fn(model_dir: str):
         if found is None:
             raise FileNotFoundError(f"{MODEL_FILE} not found under {model_dir}")
         path = found
-    return YOLO(str(path))
+    model = YOLO(str(path))
+    model.to(resolve_device())
+    return model
 
 
 def input_fn(request_body, request_content_type):
@@ -62,7 +94,13 @@ def input_fn(request_body, request_content_type):
 
 
 def predict_fn(image, model):
-    results = model.predict(image, conf=DEFAULT_CONF, iou=DEFAULT_IOU, verbose=False)
+    results = model.predict(
+        image,
+        device=resolve_device(),
+        conf=DEFAULT_CONF,
+        iou=DEFAULT_IOU,
+        verbose=False,
+    )
     detections = []
     for result in results:
         for box in result.boxes:

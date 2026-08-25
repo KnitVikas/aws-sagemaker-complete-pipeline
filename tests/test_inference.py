@@ -58,8 +58,8 @@ class _FakeModel:
         self._boxes = boxes
         self.calls = []
 
-    def predict(self, image, conf, iou, verbose):
-        self.calls.append((conf, iou))
+    def predict(self, image, conf, iou, verbose, device=None, **kwargs):
+        self.calls.append((conf, iou, device))
         return [_FakeResult(self._boxes)]
 
 
@@ -82,6 +82,26 @@ def test_input_fn_rejects_unknown_type():
 def test_input_fn_json_requires_image_field():
     with pytest.raises(ValueError, match="base64 'image'"):
         inference.input_fn(json.dumps({"nope": 1}), "application/json")
+
+
+def test_resolve_device_cpu_override(monkeypatch):
+    monkeypatch.setenv("YOLO_DEVICE", "cpu")
+    assert inference.resolve_device() == "cpu"
+
+
+def test_resolve_device_explicit_gpu_index(monkeypatch):
+    monkeypatch.setenv("YOLO_DEVICE", "0")
+    assert inference.resolve_device() == 0
+
+
+def test_resolve_device_fails_when_gpu_host_has_no_cuda(monkeypatch):
+    monkeypatch.delenv("YOLO_DEVICE", raising=False)
+    monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "0")
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="CPU-bound"):
+        inference.resolve_device()
 
 
 def test_predict_fn_maps_labels_and_rounds():
