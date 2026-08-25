@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   CI/CD for pv-yolov8: Source -> Test -> Images -> Train (SageMaker Pipeline) ->
-  Deploy (endpoint). Four CodeBuild projects, least-privilege roles, and an
-  artifact bucket. Deployment also hangs off model approval (see eventbridge.yaml).
+  Deploy (endpoint). A second Source+Deploy pipeline is started only on model
+  approval (see eventbridge.yaml), so approving a package does not retrain.
 
 Parameters:
   Project:
@@ -313,8 +313,45 @@ Resources:
               Configuration: { ProjectName: !Ref DeployProject }
               InputArtifacts: [{ Name: Trained }]
 
+  # Git push cannot start this pipeline (DetectChanges is off). EventBridge
+  # starts it on model approval so Deploy runs without Test/Images/Train.
+  # The Source artifact is the repo zip; deploy.yml re-resolves the latest
+  # Approved package from the registry and does not need Train's output.
+  ApprovalPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${Project}-deploy"
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Ref RepositoryId
+                BranchName: !Ref BranchName
+                OutputArtifactFormat: CODE_ZIP
+                DetectChanges: "false"
+              OutputArtifacts: [{ Name: Source }]
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: "1" }
+              Configuration: { ProjectName: !Ref DeployProject }
+              InputArtifacts: [{ Name: Source }]
+
 Outputs:
   PipelineName:
     Value: !Ref Pipeline
+  ApprovalPipelineName:
+    Value: !Ref ApprovalPipeline
   SageMakerExecutionRoleArn:
     Value: !GetAtt SageMakerExecutionRole.Arn

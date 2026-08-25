@@ -95,16 +95,18 @@ export MODEL_PACKAGE_GROUP=pv-yolov8-models
 4. **Train + gate + register**: `make pipeline` (upserts, starts, waits). Exit code
    `2` means the mAP gate rejected the model — that is a data/model problem, not a build failure.
 5. **Approve** the model package in the SageMaker Model Registry (console or CLI).
-6. **Deploy**: approval fires the EventBridge rule → CodePipeline deploy stage,
-   or run manually: `SAGEMAKER_ROLE_ARN=... make deploy`.
+6. **Deploy**: approval fires EventBridge → the `pv-yolov8-deploy` pipeline
+   (Source + Deploy only; no retrain), or run manually:
+   `SAGEMAKER_ROLE_ARN=... make deploy`.
 7. **Monitoring**: `make monitor` (drift alarm + dashboard; deploy also does this).
 
 ### One-shot CI/CD
 
 `make cicd` deploys `infra/codepipeline.yaml` (needs a GitHub CodeConnections ARN
 and repo id as parameters). Thereafter every push runs Test → Images → Train →
-Deploy. `make events` deploys the monthly schedule, the approval-triggered
-deploy, and the drift-triggered retrain Lambda.
+Deploy. Model approval starts a separate Source+Deploy pipeline
+(`pv-yolov8-deploy`), not the full CI pipeline. `make events` deploys the
+monthly schedule, that approval rule, and the drift-triggered retrain Lambda.
 
 ## The quality gate
 

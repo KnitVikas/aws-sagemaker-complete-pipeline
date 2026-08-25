@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Event-driven glue for pv-yolov8: monthly retraining via EventBridge Scheduler,
-  a model-approval rule that runs the CodePipeline deploy stage, a drift alarm
+  a model-approval rule that starts the Source+Deploy pipeline only, a drift alarm
   rule that starts retraining off-schedule, and a pipeline-failure SNS notice.
 
 Parameters:
@@ -11,9 +11,10 @@ Parameters:
   PipelineName:
     Type: String
     Description: SageMaker training pipeline name (pv-yolov8-training).
-  CodePipelineName:
+  DeployPipelineName:
     Type: String
-    Description: CodePipeline name to (re)run for deploys.
+    Default: pv-yolov8-deploy
+    Description: Source+Deploy CodePipeline started on model approval (not the full CI pipeline).
   ModelPackageGroup:
     Type: String
     Default: pv-yolov8-models
@@ -86,13 +87,13 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: codepipeline:StartPipelineExecution
-                Resource: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineName}"
+                Resource: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DeployPipelineName}"
 
   ModelApprovalRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "${Project}-model-approved"
-      Description: Redeploy when a model package is approved.
+      Description: Start Source+Deploy only when a model package is approved.
       EventPattern:
         source: [aws.sagemaker]
         detail-type: ["SageMaker Model Package State Change"]
@@ -101,7 +102,7 @@ Resources:
           ModelApprovalStatus: [Approved]
       Targets:
         - Id: run-deploy
-          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineName}"
+          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DeployPipelineName}"
           RoleArn: !GetAtt EventBridgeInvokePipelineRole.Arn
 
   # ------------------------------------------------ drift-triggered retrain
